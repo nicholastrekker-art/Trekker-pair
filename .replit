@@ -1,0 +1,28 @@
+
+run = "node index.js"
+entrypoint = "index.js"
+modules = ["nodejs-20"]
+
+hidden = [".config", "package-lock.json", ".env"]
+
+[nix]
+channel = "stable-24_05"
+
+[deployment]
+run = ["node", "index.js"]
+deploymentTarget = "cloudrun"
+ignorePorts = false
+
+[packager]
+language = "nodejs"
+
+[packager.features]
+packageSearch = true
+guessImports = true
+enabledForHosting = false
+
+[languages.javascript]
+pattern = "**/*.{js,jsx,ts,tsx}"
+
+[languages.javascript.languageServer]
+start = "typescript-language-server --stdio"
