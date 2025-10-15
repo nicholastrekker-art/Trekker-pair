@@ -1,0 +1,33 @@
+{
+  "description": "trekker-md-pair-code",
+  "main": "./index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "pm2 start index.js --deep-monitoring --attach --name trekker-md",
+    "stop": "pm2 stop trekker-md",
+    "restart": "pm2 restart trekker-md"
+  },
+  "author": "Trekker Tech",
+  "license": "GPL-3.0 license",
+  "dependencies": {
+    "@hapi/boom": "*",
+    "@whiskeysockets/baileys": "^6.7.18",
+    "awesome-phonenumber": "^2.64.0",
+    "axios": "*",
+    "body-parser": "^1.20.1",
+    "cors": "^2.8.5",
+    "dotenv": "*",
+    "express": "^4.18.1",
+    "fs": "^0.0.1-security",
+    "mongodb": "^6.19.0",
+    "node-cache": "*",
+    "path": "*",
+    "phone": "3.1.30",
+    "pino": "*",
+    "pm2": "^5.2.0",
+    "qrcode": "*"
+  }
+}
