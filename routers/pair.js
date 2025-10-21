@@ -97,6 +97,29 @@ async function cleanup(sock, authDir, timers = []) {
 }
 
 /**
+ * Session status storage for polling
+ */
+const sessionStatusMap = new Map();
+
+/**
+ * Endpoint to check session status
+ */
+router.get('/status/:requestId', (req, res) => {
+    const { requestId } = req.params;
+    const status = sessionStatusMap.get(requestId);
+    
+    if (status) {
+        res.json(status);
+        // Clean up after sending
+        if (status.success) {
+            setTimeout(() => sessionStatusMap.delete(requestId), 60000); // Keep for 1 minute
+        }
+    } else {
+        res.json({ pending: true });
+    }
+});
+
+/**
  * Main pairing endpoint
  */
 router.get('/', async (req, res) => {
@@ -206,8 +229,12 @@ router.get('/', async (req, res) => {
 
                 if (!hasResponded) {
                     hasResponded = true;
+                    const requestId = id; // Use the same ID for tracking
+                    sessionStatusMap.set(requestId, { pending: true });
+                    
                     res.json({ 
                         code,
+                        requestId,
                         message: "Enter this code in WhatsApp (Linked Devices > Link a Device > Link with phone number instead)",
                         number: num,
                         expiresIn: "60 seconds"
@@ -253,6 +280,10 @@ router.get('/', async (req, res) => {
 
                         console.log('✅ Session ID generated');
                         
+                        // Read creds.json for download
+                        const credsPath = path.join(authDir, 'creds.json');
+                        const credsData = fs.readFileSync(credsPath, 'utf8');
+                        
                         // Send welcome message NOW while pairing connection is still active
                         console.log('📤 Sending welcome message via active pairing connection...');
                         
@@ -275,6 +306,7 @@ router.get('/', async (req, res) => {
 • Never share credentials
 
 💡 *Next Steps:*
+• Copy your session ID from the website
 • Deploy your session ID to your bot
 • Configure your bot settings
 • Start using your bot features
@@ -291,7 +323,7 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                                 console.log(`✅ Welcome message sent! ID: ${sent.key.id}`);
                                 
                                 // Wait for message to be processed
-                                await delay(5000);
+                                await delay(3000);
                                 
                                 console.log(`🎉 COMPLETE SUCCESS!`);
                                 console.log(`📨 Message ID: ${sent.key.id}`);
@@ -301,9 +333,18 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                             console.warn('⚠️ Welcome message failed (session still valid):', msgErr.message);
                         }
                         
+                        // Store session data for polling
+                        sessionStatusMap.set(id, {
+                            success: true,
+                            sessionId: `TREKKER~${sessionId}`,
+                            credsJson: credsData,
+                            message: "Session created successfully! Check your WhatsApp for confirmation.",
+                            timestamp: new Date().toISOString()
+                        });
+                        
                         // Now close the pairing connection
                         console.log('🔌 Closing pairing connection...');
-                        await delay(3000);
+                        await delay(2000);
 
                         // Final cleanup
                         await cleanup(sock, authDir, timers);
