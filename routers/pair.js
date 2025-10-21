@@ -56,321 +56,6 @@ async function saveSessionLocallyFromPath(authDir) {
 }
 
 /**
- * Sends welcome message with retry logic using a fresh socket connection
- * sendMessage is a FUNCTION on the socket object, not an event
- */
-async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
-    const sessionDir = path.join(__dirname, 'temp', `welcome_${giftedId()}`);
-    let sock = null;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        try {
-            console.log(`\n🔄 [ATTEMPT ${attempt}/${maxAttempts}] Starting welcome message delivery...`);
-
-            // Decode session credentials
-            const decodedCreds = JSON.parse(Buffer.from(sessionId, 'base64').toString('utf8'));
-            console.log('📦 Session decoded successfully');
-
-            // Extract owner JID
-            const ownerJid = decodedCreds?.me?.id;
-            if (!ownerJid) {
-                throw new Error('Owner JID not found in credentials');
-            }
-
-            console.log('👤 Owner JID:', ownerJid);
-
-            // Create temporary directory
-            if (!fs.existsSync(sessionDir)) {
-                fs.mkdirSync(sessionDir, { recursive: true });
-            }
-
-            // Write credentials to file
-            const credsPath = path.join(sessionDir, 'creds.json');
-            fs.writeFileSync(credsPath, JSON.stringify(decodedCreds, null, 2));
-            console.log('💾 Credentials written to temp directory');
-
-            await delay(2000);
-
-            // Load auth state
-            const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-            console.log('🔑 Auth state loaded');
-
-            // Fetch latest Baileys version for compatibility
-            const { version, isLatest } = await fetchLatestBaileysVersion();
-            console.log(`📡 Using WA version: ${version.join('.')}, isLatest: ${isLatest}`);
-
-            // Create WebSocket connection
-            sock = makeWASocket({
-                version,
-                auth: {
-                    creds: state.creds,
-                    keys: makeCacheableSignalKeyStore(state.keys, logger),
-                },
-                printQRInTerminal: false,
-                logger,
-                browser: Browsers.macOS("Safari"),
-                markOnlineOnConnect: true,
-                syncFullHistory: false,
-                retryRequestDelayMs: 250,
-                getMessage: async (key) => {
-                    return { conversation: '' };
-                },
-                defaultQueryTimeoutMs: 60000,
-            });
-
-            console.log('🔌 Socket instance created, waiting for connection...');
-
-            // Promise to handle connection lifecycle
-            const result = await new Promise((resolve, reject) => {
-                const timeout = setTimeout(() => {
-                    console.error(`❌ [ATTEMPT ${attempt}] Connection timeout`);
-                    reject(new Error('Connection timeout'));
-                }, 60000);
-
-                const cleanup = () => {
-                    clearTimeout(timeout);
-
-                    // Remove all event listeners first to prevent new events
-                    if (sock?.ev) {
-                        try {
-                            sock.ev.removeAllListeners();
-                            console.log('✅ Event listeners removed');
-                        } catch (e) {
-                            console.warn('Event listener removal warning:', e.message);
-                        }
-                    }
-
-                    // Then close the WebSocket connection
-                    if (sock?.ws) {
-                        try {
-                            sock.ws.close();
-                            console.log('✅ WebSocket closed');
-                        } catch (e) {
-                            console.warn('WebSocket close warning:', e.message);
-                        }
-                    }
-
-                    // Clear socket reference
-                    sock = null;
-                };
-
-                // EVENT: Listen to connection updates
-                sock.ev.on('connection.update', async (update) => {
-                    const { connection, lastDisconnect } = update;
-
-                    console.log(`📡 [ATTEMPT ${attempt}] Connection status: ${connection}`);
-
-                    if (connection === 'open') {
-                        console.log(`✅ [ATTEMPT ${attempt}] Connection established!`);
-
-                        try {
-                            // Wait for connection to stabilize
-                            await delay(5000);
-
-                            // Prepare welcome message
-                            const phoneNumber = ownerJid.split('@')[0] || ownerJid.split(':')[0];
-                            const welcomeMsg = `🎉 *GIFTED-MD CONNECTED SUCCESSFULLY!*
-
-━━━━━━━━━━━━━━━━━━━
-✨ Your WhatsApp bot is now active!
-
-📱 *Session Details:*
-• Status: ✅ Active
-• Owner: ${decodedCreds.me?.name || 'User'}
-• Number: ${phoneNumber}
-• Platform: ${decodedCreds.platform || 'Unknown'}
-
-🔐 *Security:*
-• Session created at: ${new Date().toLocaleString()}
-• Keep your session ID secure
-• Never share credentials
-
-💡 *Next Steps:*
-• Deploy your session ID to your bot
-• Configure your bot settings
-• Start using your bot features
-
-━━━━━━━━━━━━━━━━━━━
-_Powered by GIFTED-MD_
-_Baileys v7.0 | WhatsApp Multi-Device_`;
-
-                            console.log(`📤 [ATTEMPT ${attempt}] Calling sendMessage FUNCTION...`);
-
-                            // FUNCTION CALL: sock.sendMessage is a function, not an event
-                            const sent = await sock.sendMessage(ownerJid, { 
-                                text: welcomeMsg 
-                            });
-
-                            if (sent?.key?.id) {
-                                console.log(`✅ [ATTEMPT ${attempt}] Message sent! ID: ${sent.key.id}`);
-
-                                // Wait for WhatsApp to process the message completely
-                                let messageDelivered = false;
-                                let credsSaved = false;
-                                const messageId = sent.key.id;
-
-                                // Track message delivery status
-                                const statusHandler = (updates) => {
-                                    for (const update of updates) {
-                                        if (update.key.id === messageId) {
-                                            console.log(`📨 Message status: ${update.update.status || 'pending'}`);
-                                            // Status 2 = delivered to server, 3 = delivered to device
-                                            if (update.update.status >= 2) {
-                                                messageDelivered = true;
-                                            }
-                                        }
-                                    }
-                                };
-
-                                // Track credential updates (important for encryption key changes)
-                                const credsHandler = async () => {
-                                    try {
-                                        await saveCreds();
-                                        credsSaved = true;
-                                        console.log('🔐 Session credentials saved after message');
-                                    } catch (e) {
-                                        console.warn('Creds save warning:', e.message);
-                                    }
-                                };
-
-                                sock.ev.on('messages.update', statusHandler);
-                                sock.ev.on('creds.update', credsHandler);
-
-                                // Wait for message delivery confirmation with timeout
-                                const waitStart = Date.now();
-                                const maxWait = 30000; // 30 seconds max wait
-
-                                while (!messageDelivered && (Date.now() - waitStart) < maxWait) {
-                                    await delay(1000);
-                                    
-                                    // If creds were saved, that's a good sign the message is being processed
-                                    if (credsSaved && (Date.now() - waitStart) > 10000) {
-                                        console.log('✅ Credentials updated, message processing complete');
-                                        break;
-                                    }
-                                }
-
-                                if (messageDelivered) {
-                                    console.log(`✅ Message confirmed delivered to WhatsApp servers`);
-                                } else {
-                                    console.log(`⏱️ Message sent, waiting for final confirmation...`);
-                                }
-
-                                // Critical: Give WhatsApp extra time to complete encryption updates
-                                // This prevents "Connection Closed" errors during prekey updates
-                                console.log('⏳ Finalizing session encryption...');
-                                await delay(10000);
-
-                                // Now safely cleanup
-                                try {
-                                    sock.ev.off('messages.update', statusHandler);
-                                    sock.ev.off('creds.update', credsHandler);
-                                    sock.ev.removeAllListeners('connection.update');
-                                    console.log('✅ Event listeners cleaned up');
-                                } catch (e) {
-                                    console.warn('Listener cleanup warning:', e.message);
-                                }
-
-                                // Close socket gracefully
-                                try {
-                                    if (sock?.ws?.readyState === 1) { // 1 = OPEN
-                                        sock.ws.close();
-                                        console.log('✅ Socket closed gracefully');
-                                    }
-                                } catch (e) {
-                                    console.warn('Socket close warning:', e.message);
-                                }
-                                
-                                sock = null;
-                                
-                                resolve({ 
-                                    success: true, 
-                                    attempt, 
-                                    messageId,
-                                    sessionId,
-                                    delivered: messageDelivered
-                                });
-                            } else {
-                                throw new Error('Message sent but no message ID returned');
-                            }
-
-                        } catch (err) {
-                            console.error(`❌ [ATTEMPT ${attempt}] Send error:`, err.message);
-                            cleanup();
-                            reject(err);
-                        }
-
-                    } else if (connection === 'close') {
-                        const statusCode = (lastDisconnect?.error instanceof Boom) 
-                            ? lastDisconnect.error.output.statusCode 
-                            : 500;
-
-                        console.log(`❌ [ATTEMPT ${attempt}] Connection closed: ${statusCode}`);
-
-                        cleanup();
-                        reject(new Error(`Connection closed with status: ${statusCode}`));
-                    }
-                });
-
-                // EVENT: Handle credentials update
-                sock.ev.on('creds.update', async () => {
-                    try {
-                        await saveCreds();
-                        console.log(`💾 [ATTEMPT ${attempt}] Credentials updated`);
-                    } catch (e) {
-                        console.warn('Creds update warning:', e.message);
-                    }
-                });
-            });
-
-            // Success - cleanup temp directory
-            console.log(`\n✅ SUCCESS! Message delivered on attempt ${attempt}`);
-
-            if (fs.existsSync(sessionDir)) {
-                try {
-                    await removeFile(sessionDir);
-                    console.log('🧹 Cleaned up temp directory');
-                } catch (e) {
-                    console.warn('Cleanup warning:', e.message);
-                }
-            }
-
-            return result;
-
-        } catch (err) {
-            console.error(`\n❌ [ATTEMPT ${attempt}/${maxAttempts}] Failed: ${err.message}`);
-
-            // Cleanup on error
-            if (sock?.ev) {
-                sock.ev.removeAllListeners();
-            }
-            if (sock?.ws) {
-                try {
-                    sock.ws.close();
-                } catch (e) {}
-            }
-
-            // Retry logic
-            if (attempt < maxAttempts) {
-                const waitTime = attempt * 5000;
-                console.log(`⏳ Waiting ${waitTime/1000}s before retry...`);
-                await delay(waitTime);
-            } else {
-                console.error(`\n❌ ALL ${maxAttempts} ATTEMPTS FAILED`);
-
-                if (fs.existsSync(sessionDir)) {
-                    try {
-                        await removeFile(sessionDir);
-                    } catch (e) {}
-                }
-
-                throw new Error(`Failed after ${maxAttempts} attempts: ${err.message}`);
-            }
-        }
-    }
-}
-
-/**
  * Cleanup function for socket and directories
  */
 async function cleanup(sock, authDir, timers = []) {
@@ -568,34 +253,57 @@ router.get('/', async (req, res) => {
 
                         console.log('✅ Session ID generated');
                         
-                        // Wait longer before closing to allow pending acknowledgments
-                        await delay(5000);
+                        // Send welcome message NOW while pairing connection is still active
+                        console.log('📤 Sending welcome message via active pairing connection...');
                         
-                        console.log('🔌 Closing pairing connection...');
+                        try {
+                            const phoneNumber = sock.user.id.split('@')[0] || sock.user.id.split(':')[0];
+                            const welcomeMsg = `🎉 *GIFTED-MD CONNECTED SUCCESSFULLY!*
 
-                        // Gracefully close pairing connection
-                        if (sock?.ev) {
-                            sock.ev.removeAllListeners();
-                        }
-                        if (sock?.ws) {
-                            try {
-                                sock.ws.close();
-                            } catch (e) {
-                                console.warn('Socket close warning:', e.message);
+━━━━━━━━━━━━━━━━━━━
+✨ Your WhatsApp bot is now active!
+
+📱 *Session Details:*
+• Status: ✅ Active
+• Owner: ${sock.user.name || 'User'}
+• Number: ${phoneNumber}
+• Platform: Web
+
+🔐 *Security:*
+• Session created at: ${new Date().toLocaleString()}
+• Keep your session ID secure
+• Never share credentials
+
+💡 *Next Steps:*
+• Deploy your session ID to your bot
+• Configure your bot settings
+• Start using your bot features
+
+━━━━━━━━━━━━━━━━━━━
+_Powered by GIFTED-MD_
+_Baileys v7.0 | WhatsApp Multi-Device_`;
+
+                            const sent = await sock.sendMessage(sock.user.id, { 
+                                text: welcomeMsg 
+                            });
+
+                            if (sent?.key?.id) {
+                                console.log(`✅ Welcome message sent! ID: ${sent.key.id}`);
+                                
+                                // Wait for message to be processed
+                                await delay(5000);
+                                
+                                console.log(`🎉 COMPLETE SUCCESS!`);
+                                console.log(`📨 Message ID: ${sent.key.id}`);
+                                console.log(`🔑 Session ID: ${sessionId.substring(0, 30)}...`);
                             }
+                        } catch (msgErr) {
+                            console.warn('⚠️ Welcome message failed (session still valid):', msgErr.message);
                         }
-
+                        
+                        // Now close the pairing connection
+                        console.log('🔌 Closing pairing connection...');
                         await delay(3000);
-                        console.log('✅ Pairing connection closed');
-
-                        // Send welcome message with retry
-                        console.log('🚀 Initiating welcome message delivery...');
-                        const result = await sendWelcomeMessageWithRetry(sessionId, 3);
-
-                        console.log(`\n🎉 COMPLETE SUCCESS!`);
-                        console.log(`✅ Message delivered on attempt ${result.attempt}`);
-                        console.log(`📨 Message ID: ${result.messageId}`);
-                        console.log(`🔑 Session ID: ${result.sessionId.substring(0, 30)}...`);
 
                         // Final cleanup
                         await cleanup(sock, authDir, timers);
