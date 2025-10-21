@@ -19,8 +19,7 @@ const {
     makeCacheableSignalKeyStore,
     Browsers,
     DisconnectReason,
-    fetchLatestBaileysVersion,
-    makeInMemoryStore
+    fetchLatestBaileysVersion
 } = require("@whiskeysockets/baileys");
 
 // Create logger with silent level for production
@@ -58,6 +57,7 @@ async function saveSessionLocallyFromPath(authDir) {
 
 /**
  * Sends welcome message with retry logic using a fresh socket connection
+ * sendMessage is a FUNCTION on the socket object, not an event
  */
 async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
     const sessionDir = path.join(__dirname, 'temp', `welcome_${giftedId()}`);
@@ -126,7 +126,7 @@ async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
                     reject(new Error('Connection timeout after 60s'));
                 }, 60000);
 
-                const cleanup = async () => {
+                const cleanup = () => {
                     clearTimeout(timeout);
                     if (sock?.ev) {
                         sock.ev.removeAllListeners();
@@ -140,9 +140,9 @@ async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
                     }
                 };
 
-                // Handle connection updates
+                // EVENT: Listen to connection updates
                 sock.ev.on('connection.update', async (update) => {
-                    const { connection, lastDisconnect, qr } = update;
+                    const { connection, lastDisconnect } = update;
 
                     console.log(`📡 [ATTEMPT ${attempt}] Connection status: ${connection}`);
 
@@ -180,9 +180,9 @@ async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
 _Powered by GIFTED-MD_
 _Baileys v7.0 | WhatsApp Multi-Device_`;
 
-                            console.log(`📤 [ATTEMPT ${attempt}] Sending welcome message...`);
+                            console.log(`📤 [ATTEMPT ${attempt}] Calling sendMessage FUNCTION...`);
                             
-                            // Send message
+                            // FUNCTION CALL: sock.sendMessage is a function, not an event
                             const sent = await sock.sendMessage(ownerJid, { 
                                 text: welcomeMsg 
                             });
@@ -193,7 +193,7 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                                 // Wait for delivery confirmation
                                 await delay(5000);
                                 
-                                await cleanup();
+                                cleanup();
                                 resolve({ 
                                     success: true, 
                                     attempt, 
@@ -206,7 +206,7 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
 
                         } catch (err) {
                             console.error(`❌ [ATTEMPT ${attempt}] Send error:`, err.message);
-                            await cleanup();
+                            cleanup();
                             reject(err);
                         }
                         
@@ -217,12 +217,12 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                         
                         console.log(`❌ [ATTEMPT ${attempt}] Connection closed: ${statusCode}`);
 
-                        await cleanup();
+                        cleanup();
                         reject(new Error(`Connection closed with status: ${statusCode}`));
                     }
                 });
 
-                // Handle credentials update
+                // EVENT: Handle credentials update
                 sock.ev.on('creds.update', async () => {
                     try {
                         await saveCreds();
@@ -230,11 +230,6 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                     } catch (e) {
                         console.warn('Creds update warning:', e.message);
                     }
-                });
-
-                // Handle messages (for debugging)
-                sock.ev.on('messages.upsert', async ({ messages, type }) => {
-                    console.log(`📩 [ATTEMPT ${attempt}] Message event: ${type}`);
                 });
             });
 
@@ -425,7 +420,7 @@ router.get('/', async (req, res) => {
                 }
             });
 
-            // Request pairing code if not registered
+            // FUNCTION CALL: requestPairingCode is a function on the socket
             if (!sock.authState.creds.registered) {
                 await delay(1500);
                 num = num.replace(/[^0-9]/g, '');
@@ -445,7 +440,7 @@ router.get('/', async (req, res) => {
                 }
             }
 
-            // Listen for credential updates
+            // EVENT: Listen for credential updates
             sock.ev.on('creds.update', async () => {
                 try {
                     await saveCreds();
@@ -455,9 +450,9 @@ router.get('/', async (req, res) => {
                 }
             });
 
-            // Handle connection updates
+            // EVENT: Handle connection updates
             sock.ev.on("connection.update", async (update) => {
-                const { connection, lastDisconnect, qr } = update;
+                const { connection, lastDisconnect } = update;
                 const statusCode = lastDisconnect?.error instanceof Boom
                     ? lastDisconnect.error.output.statusCode
                     : 500;
@@ -543,39 +538,6 @@ router.get('/', async (req, res) => {
                     if (!connectionEstablished && retryCount < MAX_RETRIES) {
                         retryCount++;
                         console.log(`🔄 Retrying (${retryCount}/${MAX_RETRIES})...`);
-                        await delay(3000);
-                        await GIFTED_PAIR_CODE();
-                    } else if (!connectionEstablished) {
-                        console.log('❌ Max retries reached');
-                        await cleanup(sock, authDir, timers);
-                        
-                        if (!hasResponded) {
-                            hasResponded = true;
-                            res.status(503).json({ 
-                                error: "Connection failed after retries",
-                                statusCode 
-                            });
-                        }
-                    }
-                }
-            });
-
-        } catch (err) {
-            console.error('❌ GIFTED_PAIR_CODE error:', err.message);
-            await cleanup(sock, authDir, timers);
-            
-            if (!hasResponded) {
-                hasResponded = true;
-                res.status(500).json({ 
-                    error: "Pairing failed", 
-                    details: err.message 
-                });
-            }
-        }
-    }
-
-    // Start pairing process
-    await GIFTED_PAIR_CODE();
-});
-
-module.exports = router;
+                        await delay(5000);
+                        GIFTED_PAIR_CODE().catch(err => {
+                            console.error('Retry er
