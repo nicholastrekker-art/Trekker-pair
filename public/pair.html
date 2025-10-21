@@ -46,47 +46,65 @@
             background-color: var(--background);
             color: var(--text);
             min-height: 100vh;
-            padding: 1rem;
+            padding: 6rem 1rem 1rem 1rem;
             display: flex;
             justify-content: center;
             align-items: center;
             line-height: 1.5;
         }
 
-        .theme-toggle {
+        @media (max-width: 768px) {
+            body {
+                padding: 5rem 1rem 1rem 1rem;
+            }
+        }
+
+        .header-brand {
             position: fixed;
-            top: 1.5rem;
-            right: 1.5rem;
-            background: var(--primary);
-            color: white;
-            border: none;
-            width: 3rem;
-            height: 3rem;
-            border-radius: 50%;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            padding: 1.5rem 2rem;
+            text-align: center;
             box-shadow: var(--shadow);
             z-index: 100;
-            animation: pulse 2s infinite;
+            border-bottom: 3px solid var(--accent);
         }
 
-        .theme-toggle:hover {
-            transform: scale(1.1);
-            background: var(--secondary);
+        .brand-title {
+            font-size: 2rem;
+            font-weight: 800;
+            color: white;
+            margin: 0;
+            letter-spacing: 2px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
         }
 
-        @keyframes pulse {
-            0% { box-shadow: 0 0 0 0 rgba(108, 99, 255, 0.7); }
-            70% { box-shadow: 0 0 0 12px rgba(108, 99, 255, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(108, 99, 255, 0); }
+        .brand-subtitle {
+            font-size: 0.9rem;
+            color: rgba(255, 255, 255, 0.9);
+            margin: 0.25rem 0 0 0;
+            font-weight: 500;
+            letter-spacing: 1px;
+        }
+
+        @media (max-width: 768px) {
+            .brand-title {
+                font-size: 1.5rem;
+            }
+            .brand-subtitle {
+                font-size: 0.8rem;
+            }
+            .header-brand {
+                padding: 1rem 1.5rem;
+            }
         }
 
         .container {
             background-color: var(--card-bg);
             padding: 1.5rem;
-            border-radius: 1rem;
+            border-radius: 1.5rem;
             box-shadow: var(--shadow);
             width: 100%;
             max-width: 600px;
@@ -94,8 +112,23 @@
             transform: translateY(0);
             opacity: 1;
             animation: fadeInUp 0.5s cubic-bezier(0.4, 0, 0.2, 1);
-            border: 1px solid rgba(0, 0, 0, 0.05);
+            border: 2px solid transparent;
+            background-clip: padding-box;
+            position: relative;
             margin: 1rem;
+        }
+
+        .container::before {
+            content: '';
+            position: absolute;
+            top: -2px;
+            left: -2px;
+            right: -2px;
+            bottom: -2px;
+            background: linear-gradient(135deg, var(--primary), var(--accent), var(--secondary));
+            border-radius: 1.5rem;
+            z-index: -1;
+            opacity: 0.5;
         }
 
         @media (min-width: 768px) {
@@ -162,36 +195,40 @@
         input[type="text"], input[type="number"], select {
             width: 100%;
             padding: 1rem;
-            border: 2px solid transparent;
-            border-radius: 0.5rem;
+            border: 2px solid rgba(108, 99, 255, 0.2);
+            border-radius: 0.75rem;
             background-color: var(--input-bg);
             color: var(--text);
             font-size: 1rem;
             transition: var(--transition);
             margin-bottom: 1rem;
+            font-weight: 500;
         }
 
         input[type="text"]:focus, input[type="number"]:focus, select:focus {
             outline: none;
             border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(108, 99, 255, 0.2);
+            box-shadow: 0 0 0 4px rgba(108, 99, 255, 0.15);
+            background-color: var(--card-bg);
         }
 
         .btn {
-            background-color: var(--primary);
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
             color: white;
             padding: 1rem;
             border: none;
-            border-radius: 0.5rem;
+            border-radius: 0.75rem;
             cursor: pointer;
             font-size: 1rem;
-            font-weight: 600;
+            font-weight: 700;
             width: 100%;
             transition: var(--transition);
             box-shadow: var(--shadow);
             position: relative;
             overflow: hidden;
             margin-bottom: 1rem;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
         }
 
         @media (min-width: 768px) {
@@ -315,9 +352,10 @@
     </style>
 </head>
 <body>
-    <button class="theme-toggle" id="theme-toggle" title="Toggle dark mode">
-        <i class="fas fa-moon"></i>
-    </button>
+    <div class="header-brand">
+        <h1 class="brand-title">TREKKER MD</h1>
+        <p class="brand-subtitle">WhatsApp Session Generator</p>
+    </div>
     
     <div class="container">
         <div class="flex justify-center mb-4">
@@ -370,30 +408,8 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/1.0.0-alpha.1/axios.min.js"></script>
     <script>
-        const themeToggle = document.getElementById('theme-toggle');
-        const currentTheme = localStorage.getItem('theme') || 'dark';  
-        
-        document.documentElement.setAttribute('data-theme', currentTheme);
-        
-        if (currentTheme === 'dark') {
-            themeToggle.innerHTML = '<i class="fas fa-moon"></i>';
-        } else {
-            themeToggle.innerHTML = '<i class="fas fa-sun"></i>';
-        }
-        
-        themeToggle.addEventListener('click', () => {
-            const currentTheme = document.documentElement.getAttribute('data-theme');
-            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
-            
-            document.documentElement.setAttribute('data-theme', newTheme);
-            localStorage.setItem('theme', newTheme);
-            
-            if (newTheme === 'dark') {
-                themeToggle.innerHTML = '<i class="fas fa-moon"></i>';
-            } else {
-                themeToggle.innerHTML = '<i class="fas fa-sun"></i>';
-            }
-        });
+        // Set dark theme by default
+        document.documentElement.setAttribute('data-theme', 'dark');
 
         const submitButton = document.getElementById('submit');
         const phoneNumberInput = document.getElementById('phone-number');
