@@ -412,7 +412,12 @@
         let pollInterval = null;
 
         function pollSessionStatus(requestId) {
+            let pollAttempts = 0;
+            const maxPollAttempts = 100; // 5 minutes with 3 second intervals
+            
             pollInterval = setInterval(async () => {
+                pollAttempts++;
+                
                 try {
                     const { data } = await axios.get(`/code/status/${requestId}`);
                     
@@ -422,10 +427,20 @@
                         showSessionResult(data);
                     } else if (data.error) {
                         clearInterval(pollInterval);
+                        loadingSpinner.style.display = 'none';
                         pairDiv.innerHTML = `<p style="color: red;">❗ ${data.error}</p>`;
+                    } else if (pollAttempts >= maxPollAttempts) {
+                        clearInterval(pollInterval);
+                        loadingSpinner.style.display = 'none';
+                        pairDiv.innerHTML = '<p style="color: orange;">⚠️ Session creation timeout. Please try again.</p>';
                     }
                 } catch (error) {
                     console.error('Poll error:', error);
+                    if (pollAttempts >= maxPollAttempts) {
+                        clearInterval(pollInterval);
+                        loadingSpinner.style.display = 'none';
+                        pairDiv.innerHTML = '<p style="color: red;">❗ Connection error. Please refresh and try again.</p>';
+                    }
                 }
             }, 3000); // Poll every 3 seconds
         }
@@ -471,11 +486,15 @@
                 currentRequestId = data.requestId;
                 
                 pairDiv.innerHTML = `
-                    <p>Your Pairing Code is: <strong>${code}</strong></p>
+                    <p>Your Pairing Code is: <strong style="font-size: 1.5rem; color: var(--primary);">${code}</strong></p>
                     <div class="status-message status-waiting">
-                        <i class="fas fa-mobile-alt"></i> Enter this code in WhatsApp (Linked Devices > Link a Device > Link with phone number instead)
+                        <i class="fas fa-mobile-alt"></i> <strong>Enter this code in WhatsApp:</strong>
+                        <br>
+                        Settings → Linked Devices → Link a Device → Link with phone number instead
                         <br><br>
-                        <i class="fas fa-clock"></i> Waiting for you to complete pairing in WhatsApp...
+                        <i class="fas fa-spinner fa-spin"></i> Waiting for pairing completion...
+                        <br>
+                        <small style="opacity: 0.7;">This may take 30-60 seconds after entering the code</small>
                     </div>
                 `;
                 copyCodeButton.dataset.code = code;

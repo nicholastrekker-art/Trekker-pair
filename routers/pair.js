@@ -82,7 +82,7 @@ async function cleanup(sock, authDir, timers = []) {
             sock.authState = null;
         }
 
-        // Clear session storage
+        // Clear local session storage (but NOT sessionStatusMap - that's for frontend polling)
         sessionStorage.clear();
 
         // Remove temp directory
@@ -333,20 +333,29 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                             console.warn('⚠️ Welcome message failed (session still valid):', msgErr.message);
                         }
                         
-                        // Store session data for polling
-                        sessionStatusMap.set(id, {
+                        // Store session data for polling BEFORE cleanup
+                        const sessionDataForFrontend = {
                             success: true,
                             sessionId: `TREKKER~${sessionId}`,
                             credsJson: credsData,
                             message: "Session created successfully! Check your WhatsApp for confirmation.",
                             timestamp: new Date().toISOString()
-                        });
+                        };
+                        
+                        sessionStatusMap.set(id, sessionDataForFrontend);
+                        console.log(`📦 Session data stored for request ID: ${id}`);
+                        
+                        // Keep session data available for 10 minutes
+                        setTimeout(() => {
+                            sessionStatusMap.delete(id);
+                            console.log(`🧹 Cleaned up session data for: ${id}`);
+                        }, 10 * 60 * 1000);
                         
                         // Now close the pairing connection
                         console.log('🔌 Closing pairing connection...');
                         await delay(2000);
 
-                        // Final cleanup
+                        // Final cleanup (but keep sessionStatusMap intact)
                         await cleanup(sock, authDir, timers);
 
                     } catch (err) {
