@@ -9,12 +9,13 @@ const pino = require("pino");
 const sessionStorage = new Map();
 
 const {
-    default: Gifted_Tech,
+    default: makeWASocket,
     useMultiFileAuthState,
     delay,
     makeCacheableSignalKeyStore,
     Browsers,
-    DisconnectReason
+    DisconnectReason,
+    fetchLatestBaileysVersion
 } = require("@whiskeysockets/baileys");
 
 async function saveSessionLocallyFromPath(authDir) {
@@ -71,30 +72,48 @@ async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
             console.log('💾 Credentials written to temp directory');
 
             // Wait for file to be written
-            await delay(1500);
+            await delay(2000);
 
             // Load auth state from the directory
             const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
             console.log('🔑 Auth state loaded from directory');
 
-            // Create new connection with the loaded credentials
-            connection = Gifted_Tech({
+            // Fetch latest Baileys version
+            const { version } = await fetchLatestBaileysVersion();
+
+            // Create new connection with the loaded credentials using makeWASocket
+            connection = makeWASocket({
+                version,
                 auth: {
                     creds: state.creds,
                     keys: makeCacheableSignalKeyStore(
                         state.keys,
-                        pino({ level: "silent" }).child({ level: "silent" })
+                        pino({ level: "silent" })
                     ),
                 },
                 printQRInTerminal: false,
-                logger: pino({ level: "silent" }).child({ level: "silent" }),
+                logger: pino({ level: "silent" }),
                 browser: Browsers.macOS("Safari"),
+                markOnlineOnConnect: true,
+                generateHighQualityLinkPreview: true,
                 getMessage: async (key) => {
                     return { conversation: '' };
-                }
+                },
+                shouldSyncHistoryMessage: () => false,
+                syncFullHistory: false
             });
 
             console.log('🔌 New connection instance created, waiting for connection...');
+            
+            // Suppress "Bad MAC" errors which are harmless post-cleanup noise
+            const originalConsoleError = console.error;
+            console.error = function(...args) {
+                const msg = args.join(' ');
+                if (msg.includes('Bad MAC') || msg.includes('Session error')) {
+                    return;
+                }
+                originalConsoleError.apply(console, args);
+            };
 
             const result = await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
@@ -109,11 +128,13 @@ async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
                     }
                     if (connection?.ws && connection.ws.readyState === 1) {
                         try {
-                            await connection.ws.close();
+                            connection.ws.close();
                         } catch (e) {
                             console.warn('WS close error:', e.message);
                         }
                     }
+                    // Restore console.error after cleanup
+                    console.error = originalConsoleError;
                 };
 
                 connection.ev.on('connection.update', async (update) => {
@@ -131,7 +152,7 @@ async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
                         try {
                             // Wait for connection to stabilize
                             console.log(`⏳ [ATTEMPT ${attempt}] Waiting for connection to stabilize...`);
-                            await delay(3000);
+                            await delay(5000);
 
                             // Prepare welcome message
                             const welcomeMsg = `🎉 *GIFTED-MD CONNECTED SUCCESSFULLY!*
@@ -142,8 +163,8 @@ async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
 📱 *Session Details:*
 • Status: Active ✅
 • Owner: ${decodedCreds.me?.name || 'User'}
-• Number: ${ownerJid.split(':')[0]}
-• Attempt: ${attempt}/${maxAttempts}
+• Number: ${ownerJid.split(':')[0] || ownerJid.split('@')[0]}
+• Session ID: ${sessionId.substring(0, 20)}...
 
 💡 *Quick Tips:*
 • Keep your session ID secure
@@ -165,12 +186,12 @@ _Session created successfully!_`;
                                 console.log(`✅ [ATTEMPT ${attempt}] Welcome message sent successfully!`);
                                 console.log(`📨 [ATTEMPT ${attempt}] Message ID:`, sent.key.id);
                                 
-                                // Wait longer to ensure message is delivered
+                                // Wait for message delivery confirmation
                                 console.log(`⏳ [ATTEMPT ${attempt}] Waiting for message delivery confirmation...`);
-                                await delay(8000);
+                                await delay(5000);
                                 
                                 await cleanup();
-                                resolve({ success: true, attempt, messageId: sent.key.id });
+                                resolve({ success: true, attempt, messageId: sent.key.id, sessionId });
                             } else {
                                 throw new Error('Message send returned no key/id');
                             }
@@ -204,8 +225,8 @@ _Session created successfully!_`;
                     }
                 });
 
-                connection.ev.on('connection.error', (err) => {
-                    console.error(`⚠️ [ATTEMPT ${attempt}] Connection error event:`, err);
+                connection.ev.on('messages.upsert', async (m) => {
+                    console.log('📩 Message received:', JSON.stringify(m, null, 2));
                 });
             });
 
@@ -225,6 +246,11 @@ _Session created successfully!_`;
             return result;
 
         } catch (err) {
+            // Restore console.error in case of error
+            if (originalConsoleError) {
+                console.error = originalConsoleError;
+            }
+            
             console.error(`\n❌ [ATTEMPT ${attempt}/${maxAttempts}] Failed:`, err.message);
             
             // Cleanup connection
@@ -233,17 +259,16 @@ _Session created successfully!_`;
             }
             if (connection?.ws && connection.ws.readyState === 1) {
                 try {
-                    await connection.ws.close();
+                    connection.ws.close();
                 } catch (e) {}
             }
 
             // If this is not the last attempt, wait before retrying
             if (attempt < maxAttempts) {
-                const waitTime = attempt * 5000; // Increasing wait time: 5s, 10s, 15s
+                const waitTime = attempt * 5000;
                 console.log(`⏳ Waiting ${waitTime/1000} seconds before retry...`);
                 await delay(waitTime);
             } else {
-                // This was the last attempt, cleanup and throw
                 console.error(`\n❌ ALL ${maxAttempts} ATTEMPTS FAILED`);
                 
                 if (fs.existsSync(sessionDir)) {
@@ -258,20 +283,20 @@ _Session created successfully!_`;
     }
 }
 
-async function cleanup(Gifted, authDir, timers = []) {
+async function cleanup(socket, authDir, timers = []) {
     try {
         timers.forEach(t => clearTimeout(t));
 
-        if (Gifted?.ev) {
-            Gifted.ev.removeAllListeners();
+        if (socket?.ev) {
+            socket.ev.removeAllListeners();
         }
 
-        if (Gifted?.ws && Gifted.ws.readyState === 1) {
-            await Gifted.ws.close();
+        if (socket?.ws && socket.ws.readyState === 1) {
+            socket.ws.close();
         }
 
-        if (Gifted) {
-            Gifted.authState = null;
+        if (socket) {
+            socket.authState = null;
         }
 
         sessionStorage.clear();
@@ -294,7 +319,7 @@ router.get('/', async (req, res) => {
         return res.status(400).json({ error: "Phone number is required" });
     }
 
-    // FIRST STEP: Clean up old temp directories
+    // Clean up old temp directories
     const tempBaseDir = path.join(__dirname, 'temp');
     try {
         console.log('🧹 Cleaning old temp directories...');
@@ -318,7 +343,7 @@ router.get('/', async (req, res) => {
     }
 
     const authDir = path.join(__dirname, 'temp', id);
-    let Gifted = null;
+    let socket = null;
     let timers = [];
     let hasResponded = false;
     let connectionEstablished = false;
@@ -328,7 +353,7 @@ router.get('/', async (req, res) => {
     const globalTimeout = setTimeout(async () => {
         if (!connectionEstablished) {
             console.log('⏱️ Global timeout reached');
-            await cleanup(Gifted, authDir, timers);
+            await cleanup(socket, authDir, timers);
             if (!hasResponded) {
                 hasResponded = true;
                 res.status(408).json({ error: "Connection timeout. Please try again." });
@@ -345,35 +370,39 @@ router.get('/', async (req, res) => {
             }
 
             const { state, saveCreds } = await useMultiFileAuthState(authDir);
+            const { version } = await fetchLatestBaileysVersion();
 
-            Gifted = Gifted_Tech({
+            // Use makeWASocket directly
+            socket = makeWASocket({
+                version,
                 auth: {
                     creds: state.creds,
                     keys: makeCacheableSignalKeyStore(
                         state.keys, 
-                        pino({ level: "fatal" }).child({ level: "fatal" })
+                        pino({ level: "fatal" })
                     ),
                 },
                 printQRInTerminal: false,
-                logger: pino({ level: "fatal" }).child({ level: "fatal" }),
-                browser: Browsers.macOS("Safari")
+                logger: pino({ level: "fatal" }),
+                browser: Browsers.macOS("Safari"),
+                markOnlineOnConnect: false
             });
 
-            if (!Gifted.authState.creds.registered) {
+            if (!socket.authState.creds.registered) {
                 await delay(1500);
                 num = num.replace(/[^0-9]/g, '');
-                const code = await Gifted.requestPairingCode(num);
+                const code = await socket.requestPairingCode(num);
 
                 if (!hasResponded) {
                     hasResponded = true;
                     res.json({ 
                         code,
-                        message: "Enter this code in WhatsApp. You'll receive a welcome message once connected (may take up to 3 attempts)."
+                        message: "Enter this code in WhatsApp. You'll receive a welcome message once connected."
                     });
                 }
             }
 
-            Gifted.ev.on('creds.update', async () => {
+            socket.ev.on('creds.update', async () => {
                 try {
                     await saveCreds();
                 } catch (err) {
@@ -381,7 +410,7 @@ router.get('/', async (req, res) => {
                 }
             });
 
-            Gifted.ev.on("connection.update", async (update) => {
+            socket.ev.on("connection.update", async (update) => {
                 const { connection, lastDisconnect } = update;
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
 
@@ -393,12 +422,8 @@ router.get('/', async (req, res) => {
                         console.log('⏳ Waiting for credentials to be fully saved...');
                         await delay(8000);
 
-                        try {
-                            await saveCreds();
-                            console.log('💾 Final credentials save completed');
-                        } catch (err) {
-                            console.warn('Final saveCreds() failed:', err.message);
-                        }
+                        await saveCreds();
+                        console.log('💾 Final credentials save completed');
 
                         // Generate session ID
                         const sessionId = await saveSessionLocallyFromPath(authDir);
@@ -409,38 +434,38 @@ router.get('/', async (req, res) => {
                         console.log('✅ Session ID generated successfully');
                         console.log('🔌 Closing pairing connection...');
 
-                        // Close the pairing connection properly
-                        if (Gifted?.ev) {
-                            Gifted.ev.removeAllListeners();
+                        // Close the pairing connection
+                        if (socket?.ev) {
+                            socket.ev.removeAllListeners();
                         }
-                        if (Gifted?.ws && Gifted.ws.readyState === 1) {
-                            await Gifted.ws.close();
+                        if (socket?.ws && socket.ws.readyState === 1) {
+                            socket.ws.close();
                         }
                         
-                        // Wait for connection to fully close
                         await delay(3000);
                         console.log('✅ Pairing connection closed');
 
-                        // Now establish new connection and send welcome message WITH RETRY
+                        // Send welcome message with retry
                         console.log('🚀 Starting welcome message sender with retry logic...');
                         const result = await sendWelcomeMessageWithRetry(sessionId, 3);
                         
                         console.log(`\n🎉 COMPLETE SUCCESS!`);
                         console.log(`✅ Welcome message delivered on attempt ${result.attempt}`);
                         console.log(`📨 Message ID: ${result.messageId}`);
+                        console.log(`🔑 Session ID: ${result.sessionId.substring(0, 30)}...`);
 
-                        // Final cleanup of pairing directory
-                        await cleanup(Gifted, authDir, timers);
+                        // Final cleanup
+                        await cleanup(socket, authDir, timers);
 
                     } catch (err) {
                         console.error('❌ Error in connection.open handler:', err.message);
                         console.error('Stack:', err.stack);
-                        await cleanup(Gifted, authDir, timers);
+                        await cleanup(socket, authDir, timers);
 
                         if (!hasResponded) {
                             hasResponded = true;
                             res.status(500).json({ 
-                                error: "Failed to send welcome message after multiple attempts. Session may still be valid." 
+                                error: "Failed to send welcome message. Session may still be valid." 
                             });
                         }
                     }
@@ -450,7 +475,7 @@ router.get('/', async (req, res) => {
 
                     if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
                         console.log('⚠️ Logged out or unauthorized');
-                        await cleanup(Gifted, authDir, timers);
+                        await cleanup(socket, authDir, timers);
 
                         if (!hasResponded) {
                             hasResponded = true;
@@ -468,7 +493,7 @@ router.get('/', async (req, res) => {
                         });
                     } else {
                         console.log('❌ Max retries reached or connection was established');
-                        await cleanup(Gifted, authDir, timers);
+                        await cleanup(socket, authDir, timers);
                     }
                 }
             });
@@ -476,7 +501,7 @@ router.get('/', async (req, res) => {
         } catch (err) {
             console.error('❌ GIFTED_PAIR_CODE error:', err.message);
             console.error('Stack:', err.stack);
-            await cleanup(Gifted, authDir, timers);
+            await cleanup(socket, authDir, timers);
 
             if (!hasResponded) {
                 hasResponded = true;
