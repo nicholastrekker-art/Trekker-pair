@@ -152,19 +152,19 @@ router.get('/', async (req, res) => {
                         if (!recipientId) throw new Error('Recipient id not found to send session ID');
 
                         const sent = await Gifted.sendMessage(recipientId, { text: sessionId });
-                        const messageKey = sent?.key || null;
-                        let acked = false;
-                        if (messageKey) acked = await waitForMessageAck(Gifted, messageKey, 5000);
-                        if (!acked) console.log('No ACK; closing immediately.');
+                        console.log('✅ Session ID sent successfully');
+                        
+                        // Wait a bit for message to be delivered
+                        await delay(3000);
 
-                        // 🚨 Immediately close connection and cleanup
+                        // 🚨 Close connection and cleanup
                         if (Gifted.ev) Gifted.ev.removeAllListeners();
                         if (Gifted.ws && Gifted.ws.readyState === 1) await Gifted.ws.close();
                         Gifted.authState = null;
                         sessionStorage.clear();
                         if (fs.existsSync(authDir)) await removeFile(authDir);
                         clearTimeout(forceCleanupTimer);
-                        console.log('Connection closed immediately after sending session ID.');
+                        console.log('✅ Connection closed after sending session ID.');
                     } catch (err) {
                         console.error('connection.open error:', err.message);
                         try {
