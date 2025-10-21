@@ -43,7 +43,7 @@ function waitForMessageAck(Gifted, messageKey, timeoutMs = 8000) {
         const timer = setTimeout(() => {
             if (!resolved) {
                 resolved = true;
-                Gifted.ev.removeListener('messages.update', handler);
+                Gifted.ev.off('messages.update', handler);
                 resolve(false);
             }
         }, timeoutMs);
@@ -55,7 +55,7 @@ function waitForMessageAck(Gifted, messageKey, timeoutMs = 8000) {
                     if (!resolved) {
                         resolved = true;
                         clearTimeout(timer);
-                        Gifted.ev.removeListener('messages.update', handler);
+                        Gifted.ev.off('messages.update', handler);
                         resolve(true);
                         return;
                     }
