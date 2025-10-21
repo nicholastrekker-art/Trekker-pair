@@ -34,11 +34,11 @@ async function saveSessionLocallyFromPath(authDir) {
         if (!fs.existsSync(authPath)) {
             throw new Error(`Credentials file not found at: ${authPath}`);
         }
-        
+
         const rawData = fs.readFileSync(authPath, 'utf8');
         const credsData = JSON.parse(rawData);
         const credsBase64 = Buffer.from(JSON.stringify(credsData)).toString('base64');
-        
+
         const now = new Date();
         sessionStorage.set(credsBase64, {
             sessionId: credsBase64,
@@ -46,7 +46,7 @@ async function saveSessionLocallyFromPath(authDir) {
             createdAt: now,
             updatedAt: now
         });
-        
+
         console.log('✅ Session saved to storage');
         return credsBase64;
     } catch (e) {
@@ -62,11 +62,11 @@ async function saveSessionLocallyFromPath(authDir) {
 async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
     const sessionDir = path.join(__dirname, 'temp', `welcome_${giftedId()}`);
     let sock = null;
-    
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
             console.log(`\n🔄 [ATTEMPT ${attempt}/${maxAttempts}] Starting welcome message delivery...`);
-            
+
             // Decode session credentials
             const decodedCreds = JSON.parse(Buffer.from(sessionId, 'base64').toString('utf8'));
             console.log('📦 Session decoded successfully');
@@ -128,16 +128,29 @@ async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
 
                 const cleanup = () => {
                     clearTimeout(timeout);
+
+                    // Remove all event listeners first to prevent new events
                     if (sock?.ev) {
-                        sock.ev.removeAllListeners();
+                        try {
+                            sock.ev.removeAllListeners();
+                            console.log('✅ Event listeners removed');
+                        } catch (e) {
+                            console.warn('Event listener removal warning:', e.message);
+                        }
                     }
+
+                    // Then close the WebSocket connection
                     if (sock?.ws) {
                         try {
                             sock.ws.close();
+                            console.log('✅ WebSocket closed');
                         } catch (e) {
                             console.warn('WebSocket close warning:', e.message);
                         }
                     }
+
+                    // Clear socket reference
+                    sock = null;
                 };
 
                 // EVENT: Listen to connection updates
@@ -181,7 +194,7 @@ _Powered by GIFTED-MD_
 _Baileys v7.0 | WhatsApp Multi-Device_`;
 
                             console.log(`📤 [ATTEMPT ${attempt}] Calling sendMessage FUNCTION...`);
-                            
+
                             // FUNCTION CALL: sock.sendMessage is a function, not an event
                             const sent = await sock.sendMessage(ownerJid, { 
                                 text: welcomeMsg 
@@ -189,16 +202,46 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
 
                             if (sent?.key?.id) {
                                 console.log(`✅ [ATTEMPT ${attempt}] Message sent! ID: ${sent.key.id}`);
-                                
-                                // Wait for delivery confirmation
-                                await delay(5000);
-                                
+
+                                // Wait for message to be acknowledged by WhatsApp servers
+                                let messageAcknowledged = false;
+
+                                const ackListener = sock.ev.on('messages.update', (updates) => {
+                                    for (const update of updates) {
+                                        if (update.key.id === sent.key.id) {
+                                            console.log(`📨 Message status update:`, update.update);
+                                            if (update.update.status >= 2) { // 2 = server ack, 3 = delivered
+                                                messageAcknowledged = true;
+                                            }
+                                        }
+                                    }
+                                });
+
+                                // Wait up to 15 seconds for acknowledgment
+                                const ackTimeout = 15000;
+                                const startTime = Date.now();
+
+                                while (!messageAcknowledged && (Date.now() - startTime) < ackTimeout) {
+                                    await delay(1000);
+                                }
+
+                                if (messageAcknowledged) {
+                                    console.log(`✅ Message acknowledged by WhatsApp servers`);
+                                } else {
+                                    console.log(`⚠️ Message sent but acknowledgment timeout (may still deliver)`);
+                                }
+
+                                // Additional delay to ensure all pending operations complete
+                                await delay(3000);
+
+                                // Now safe to cleanup
                                 cleanup();
                                 resolve({ 
                                     success: true, 
                                     attempt, 
                                     messageId: sent.key.id,
-                                    sessionId 
+                                    sessionId,
+                                    acknowledged: messageAcknowledged
                                 });
                             } else {
                                 throw new Error('Message sent but no key returned');
@@ -209,12 +252,12 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                             cleanup();
                             reject(err);
                         }
-                        
+
                     } else if (connection === 'close') {
                         const statusCode = (lastDisconnect?.error instanceof Boom) 
                             ? lastDisconnect.error.output.statusCode 
                             : 500;
-                        
+
                         console.log(`❌ [ATTEMPT ${attempt}] Connection closed: ${statusCode}`);
 
                         cleanup();
@@ -235,7 +278,7 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
 
             // Success - cleanup temp directory
             console.log(`\n✅ SUCCESS! Message delivered on attempt ${attempt}`);
-            
+
             if (fs.existsSync(sessionDir)) {
                 try {
                     await removeFile(sessionDir);
@@ -244,12 +287,12 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                     console.warn('Cleanup warning:', e.message);
                 }
             }
-            
+
             return result;
 
         } catch (err) {
             console.error(`\n❌ [ATTEMPT ${attempt}/${maxAttempts}] Failed: ${err.message}`);
-            
+
             // Cleanup on error
             if (sock?.ev) {
                 sock.ev.removeAllListeners();
@@ -267,13 +310,13 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                 await delay(waitTime);
             } else {
                 console.error(`\n❌ ALL ${maxAttempts} ATTEMPTS FAILED`);
-                
+
                 if (fs.existsSync(sessionDir)) {
                     try {
                         await removeFile(sessionDir);
                     } catch (e) {}
                 }
-                
+
                 throw new Error(`Failed after ${maxAttempts} attempts: ${err.message}`);
             }
         }
@@ -424,7 +467,7 @@ router.get('/', async (req, res) => {
             if (!sock.authState.creds.registered) {
                 await delay(1500);
                 num = num.replace(/[^0-9]/g, '');
-                
+
                 console.log('📱 Requesting pairing code for:', num);
                 const code = await sock.requestPairingCode(num);
                 console.log('✅ Pairing code generated:', code);
@@ -486,14 +529,14 @@ router.get('/', async (req, res) => {
                         if (sock?.ws) {
                             sock.ws.close();
                         }
-                        
+
                         await delay(3000);
                         console.log('✅ Pairing connection closed');
 
                         // Send welcome message with retry
                         console.log('🚀 Initiating welcome message delivery...');
                         const result = await sendWelcomeMessageWithRetry(sessionId, 3);
-                        
+
                         console.log(`\n🎉 COMPLETE SUCCESS!`);
                         console.log(`✅ Message delivered on attempt ${result.attempt}`);
                         console.log(`📨 Message ID: ${result.messageId}`);
@@ -545,7 +588,7 @@ router.get('/', async (req, res) => {
                     } else if (!connectionEstablished) {
                         console.log('❌ Max retries reached or connection failed');
                         await cleanup(sock, authDir, timers);
-                        
+
                         if (!hasResponded) {
                             hasResponded = true;
                             res.status(500).json({ 
@@ -559,7 +602,7 @@ router.get('/', async (req, res) => {
         } catch (error) {
             console.error('❌ Pairing error:', error);
             await cleanup(sock, authDir, timers);
-            
+
             if (!hasResponded) {
                 hasResponded = true;
                 res.status(500).json({ 
