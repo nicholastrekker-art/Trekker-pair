@@ -111,6 +111,7 @@ async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
                 browser: Browsers.macOS("Safari"),
                 markOnlineOnConnect: true,
                 syncFullHistory: false,
+                retryRequestDelayMs: 250,
                 getMessage: async (key) => {
                     return { conversation: '' };
                 },
@@ -124,7 +125,7 @@ async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
                 const timeout = setTimeout(() => {
                     console.error(`❌ [ATTEMPT ${attempt}] Connection timeout`);
                     reject(new Error('Connection timeout after 60s'));
-                }, 60000);
+                }, 90000);
 
                 const cleanup = () => {
                     clearTimeout(timeout);
@@ -231,11 +232,31 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                                     console.log(`⚠️ Message sent but acknowledgment timeout (may still deliver)`);
                                 }
 
-                                // Additional delay to ensure all pending operations complete
-                                await delay(3000);
+                                // Remove event listeners first to prevent processing new events
+                                if (sock?.ev) {
+                                    try {
+                                        sock.ev.removeAllListeners();
+                                        console.log('✅ Event listeners removed');
+                                    } catch (e) {
+                                        console.warn('Event listener removal warning:', e.message);
+                                    }
+                                }
 
-                                // Now safe to cleanup
-                                cleanup();
+                                // Additional delay to ensure all pending operations complete
+                                await delay(5000);
+
+                                // Now safe to cleanup socket
+                                if (sock?.ws) {
+                                    try {
+                                        sock.ws.close();
+                                        console.log('✅ WebSocket closed');
+                                    } catch (e) {
+                                        console.warn('WebSocket close warning:', e.message);
+                                    }
+                                }
+                                
+                                sock = null;
+                                
                                 resolve({ 
                                     success: true, 
                                     attempt, 
@@ -520,14 +541,22 @@ router.get('/', async (req, res) => {
                         }
 
                         console.log('✅ Session ID generated');
+                        
+                        // Wait longer before closing to allow pending acknowledgments
+                        await delay(5000);
+                        
                         console.log('🔌 Closing pairing connection...');
 
-                        // Close pairing connection
+                        // Gracefully close pairing connection
                         if (sock?.ev) {
                             sock.ev.removeAllListeners();
                         }
                         if (sock?.ws) {
-                            sock.ws.close();
+                            try {
+                                sock.ws.close();
+                            } catch (e) {
+                                console.warn('Socket close warning:', e.message);
+                            }
                         }
 
                         await delay(3000);
