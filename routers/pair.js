@@ -540,4 +540,38 @@ router.get('/', async (req, res) => {
                         console.log(`🔄 Retrying (${retryCount}/${MAX_RETRIES})...`);
                         await delay(5000);
                         GIFTED_PAIR_CODE().catch(err => {
-                            console.error('Retry er
+                            console.error('Retry error:', err);
+                        });
+                    } else if (!connectionEstablished) {
+                        console.log('❌ Max retries reached or connection failed');
+                        await cleanup(sock, authDir, timers);
+                        
+                        if (!hasResponded) {
+                            hasResponded = true;
+                            res.status(500).json({ 
+                                error: "Connection failed after retries",
+                                reason: "Could not establish connection"
+                            });
+                        }
+                    }
+                }
+            });
+        } catch (error) {
+            console.error('❌ Pairing error:', error);
+            await cleanup(sock, authDir, timers);
+            
+            if (!hasResponded) {
+                hasResponded = true;
+                res.status(500).json({ 
+                    error: "Pairing failed",
+                    details: error.message 
+                });
+            }
+        }
+    }
+
+    // Call the pairing function
+    await GIFTED_PAIR_CODE();
+});
+
+module.exports = router;
