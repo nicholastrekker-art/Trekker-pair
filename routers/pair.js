@@ -204,68 +204,81 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                             if (sent?.key?.id) {
                                 console.log(`✅ [ATTEMPT ${attempt}] Message sent! ID: ${sent.key.id}`);
 
-                                // Wait for message acknowledgment and session updates
-                                let messageAcknowledged = false;
-                                let sessionUpdateReceived = false;
+                                // Wait for WhatsApp to process the message completely
+                                let messageDelivered = false;
+                                let credsSaved = false;
+                                const messageId = sent.key.id;
 
-                                // Listen for message status updates
-                                sock.ev.on('messages.update', (updates) => {
+                                // Track message delivery status
+                                const statusHandler = (updates) => {
                                     for (const update of updates) {
-                                        if (update.key.id === sent.key.id) {
-                                            console.log(`📨 Message status:`, update.update);
+                                        if (update.key.id === messageId) {
+                                            console.log(`📨 Message status: ${update.update.status || 'pending'}`);
+                                            // Status 2 = delivered to server, 3 = delivered to device
                                             if (update.update.status >= 2) {
-                                                messageAcknowledged = true;
+                                                messageDelivered = true;
                                             }
                                         }
                                     }
-                                });
+                                };
 
-                                // Listen for session updates (prekey bundle changes)
-                                const originalCredsUpdate = sock.ev.listeners('creds.update')[0];
-                                sock.ev.on('creds.update', async () => {
-                                    sessionUpdateReceived = true;
-                                    console.log('🔄 Session update received');
-                                });
-
-                                // Wait for acknowledgment OR session update
-                                const waitTimeout = 20000;
-                                const startTime = Date.now();
-
-                                while (!messageAcknowledged && !sessionUpdateReceived && (Date.now() - startTime) < waitTimeout) {
-                                    await delay(1000);
-                                }
-
-                                if (messageAcknowledged) {
-                                    console.log(`✅ Message acknowledged by WhatsApp`);
-                                } else if (sessionUpdateReceived) {
-                                    console.log(`✅ Session updated, message likely delivered`);
-                                } else {
-                                    console.log(`⏱️ Timeout, but message was sent`);
-                                }
-
-                                // Give WhatsApp time to finish any pending session operations
-                                console.log('⏳ Allowing session operations to complete...');
-                                await delay(8000);
-
-                                // Gracefully remove listeners
-                                if (sock?.ev) {
+                                // Track credential updates (important for encryption key changes)
+                                const credsHandler = async () => {
                                     try {
-                                        sock.ev.removeAllListeners('messages.update');
-                                        sock.ev.removeAllListeners('connection.update');
-                                        console.log('✅ Event listeners removed');
+                                        await saveCreds();
+                                        credsSaved = true;
+                                        console.log('🔐 Session credentials saved after message');
                                     } catch (e) {
-                                        console.warn('Listener removal warning:', e.message);
+                                        console.warn('Creds save warning:', e.message);
                                     }
+                                };
+
+                                sock.ev.on('messages.update', statusHandler);
+                                sock.ev.on('creds.update', credsHandler);
+
+                                // Wait for message delivery confirmation with timeout
+                                const waitStart = Date.now();
+                                const maxWait = 30000; // 30 seconds max wait
+
+                                while (!messageDelivered && (Date.now() - waitStart) < maxWait) {
+                                    await delay(1000);
+                                    
+                                    // If creds were saved, that's a good sign the message is being processed
+                                    if (credsSaved && (Date.now() - waitStart) > 10000) {
+                                        console.log('✅ Credentials updated, message processing complete');
+                                        break;
+                                    }
+                                }
+
+                                if (messageDelivered) {
+                                    console.log(`✅ Message confirmed delivered to WhatsApp servers`);
+                                } else {
+                                    console.log(`⏱️ Message sent, waiting for final confirmation...`);
+                                }
+
+                                // Critical: Give WhatsApp extra time to complete encryption updates
+                                // This prevents "Connection Closed" errors during prekey updates
+                                console.log('⏳ Finalizing session encryption...');
+                                await delay(10000);
+
+                                // Now safely cleanup
+                                try {
+                                    sock.ev.off('messages.update', statusHandler);
+                                    sock.ev.off('creds.update', credsHandler);
+                                    sock.ev.removeAllListeners('connection.update');
+                                    console.log('✅ Event listeners cleaned up');
+                                } catch (e) {
+                                    console.warn('Listener cleanup warning:', e.message);
                                 }
 
                                 // Close socket gracefully
-                                if (sock?.ws) {
-                                    try {
+                                try {
+                                    if (sock?.ws?.readyState === 1) { // 1 = OPEN
                                         sock.ws.close();
-                                        console.log('✅ Socket closed');
-                                    } catch (e) {
-                                        console.warn('Socket close warning:', e.message);
+                                        console.log('✅ Socket closed gracefully');
                                     }
+                                } catch (e) {
+                                    console.warn('Socket close warning:', e.message);
                                 }
                                 
                                 sock = null;
@@ -273,12 +286,12 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                                 resolve({ 
                                     success: true, 
                                     attempt, 
-                                    messageId: sent.key.id,
+                                    messageId,
                                     sessionId,
-                                    acknowledged: messageAcknowledged
+                                    delivered: messageDelivered
                                 });
                             } else {
-                                throw new Error('Message sent but no key returned');
+                                throw new Error('Message sent but no message ID returned');
                             }
 
                         } catch (err) {
