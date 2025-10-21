@@ -24,10 +24,6 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Removed: qr and validate routes
 app.use('/code', pairRoute);
 
-app.get('/validate', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'validate.html'));
-});
-
 app.get('/pair', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'pair.html'));
 });
