@@ -3,11 +3,15 @@ const express = require('express');
 const fs = require('fs');
 require('dotenv').config();
 const path = require('path');
-let router = express.Router();
 const pino = require("pino");
+const { Boom } = require('@hapi/boom');
 
+let router = express.Router();
+
+// Session storage for tracking active sessions
 const sessionStorage = new Map();
 
+// Import Baileys modules
 const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -15,18 +19,27 @@ const {
     makeCacheableSignalKeyStore,
     Browsers,
     DisconnectReason,
-    fetchLatestBaileysVersion
+    fetchLatestBaileysVersion,
+    makeInMemoryStore
 } = require("@whiskeysockets/baileys");
 
+// Create logger with silent level for production
+const logger = pino({ level: "silent" });
+
+/**
+ * Saves session credentials locally and returns base64 encoded session ID
+ */
 async function saveSessionLocallyFromPath(authDir) {
     const authPath = path.join(authDir, 'creds.json');
     try {
         if (!fs.existsSync(authPath)) {
             throw new Error(`Credentials file not found at: ${authPath}`);
         }
+        
         const rawData = fs.readFileSync(authPath, 'utf8');
         const credsData = JSON.parse(rawData);
         const credsBase64 = Buffer.from(JSON.stringify(credsData)).toString('base64');
+        
         const now = new Date();
         sessionStorage.set(credsBase64, {
             sessionId: credsBase64,
@@ -34,239 +47,228 @@ async function saveSessionLocallyFromPath(authDir) {
             createdAt: now,
             updatedAt: now
         });
+        
+        console.log('✅ Session saved to storage');
         return credsBase64;
     } catch (e) {
-        console.error('saveSessionLocallyFromPath error:', e.message);
+        console.error('❌ saveSessionLocallyFromPath error:', e.message);
         return null;
     }
 }
 
+/**
+ * Sends welcome message with retry logic using a fresh socket connection
+ */
 async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
     const sessionDir = path.join(__dirname, 'temp', `welcome_${giftedId()}`);
-    let connection = null;
+    let sock = null;
     
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-            console.log(`\n🔄 [ATTEMPT ${attempt}/${maxAttempts}] Starting welcome message process...`);
+            console.log(`\n🔄 [ATTEMPT ${attempt}/${maxAttempts}] Starting welcome message delivery...`);
             
-            // Decode the base64 session
+            // Decode session credentials
             const decodedCreds = JSON.parse(Buffer.from(sessionId, 'base64').toString('utf8'));
             console.log('📦 Session decoded successfully');
 
             // Extract owner JID
             const ownerJid = decodedCreds?.me?.id;
             if (!ownerJid) {
-                throw new Error('Owner JID not found in session data');
+                throw new Error('Owner JID not found in credentials');
             }
 
             console.log('👤 Owner JID:', ownerJid);
 
-            // Create temporary directory for this session
+            // Create temporary directory
             if (!fs.existsSync(sessionDir)) {
                 fs.mkdirSync(sessionDir, { recursive: true });
             }
 
-            // Write credentials to creds.json
+            // Write credentials to file
             const credsPath = path.join(sessionDir, 'creds.json');
             fs.writeFileSync(credsPath, JSON.stringify(decodedCreds, null, 2));
             console.log('💾 Credentials written to temp directory');
 
-            // Wait for file to be written
             await delay(2000);
 
-            // Load auth state from the directory
+            // Load auth state
             const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-            console.log('🔑 Auth state loaded from directory');
+            console.log('🔑 Auth state loaded');
 
-            // Fetch latest Baileys version
-            const { version } = await fetchLatestBaileysVersion();
+            // Fetch latest Baileys version for compatibility
+            const { version, isLatest } = await fetchLatestBaileysVersion();
+            console.log(`📡 Using WA version: ${version.join('.')}, isLatest: ${isLatest}`);
 
-            // Create new connection with the loaded credentials using makeWASocket
-            connection = makeWASocket({
+            // Create WebSocket connection
+            sock = makeWASocket({
                 version,
                 auth: {
                     creds: state.creds,
-                    keys: makeCacheableSignalKeyStore(
-                        state.keys,
-                        pino({ level: "silent" })
-                    ),
+                    keys: makeCacheableSignalKeyStore(state.keys, logger),
                 },
                 printQRInTerminal: false,
-                logger: pino({ level: "silent" }),
+                logger,
                 browser: Browsers.macOS("Safari"),
                 markOnlineOnConnect: true,
-                generateHighQualityLinkPreview: true,
+                syncFullHistory: false,
                 getMessage: async (key) => {
                     return { conversation: '' };
                 },
-                shouldSyncHistoryMessage: () => false,
-                syncFullHistory: false
+                defaultQueryTimeoutMs: 60000,
             });
 
-            console.log('🔌 New connection instance created, waiting for connection...');
-            
-            // Suppress "Bad MAC" errors which are harmless post-cleanup noise
-            const originalConsoleError = console.error;
-            console.error = function(...args) {
-                const msg = args.join(' ');
-                if (msg.includes('Bad MAC') || msg.includes('Session error')) {
-                    return;
-                }
-                originalConsoleError.apply(console, args);
-            };
+            console.log('🔌 Socket instance created, waiting for connection...');
 
+            // Promise to handle connection lifecycle
             const result = await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
-                    console.error(`❌ [ATTEMPT ${attempt}] Connection timeout after 60 seconds`);
-                    reject(new Error('Connection timeout'));
+                    console.error(`❌ [ATTEMPT ${attempt}] Connection timeout`);
+                    reject(new Error('Connection timeout after 60s'));
                 }, 60000);
 
                 const cleanup = async () => {
                     clearTimeout(timeout);
-                    if (connection?.ev) {
-                        connection.ev.removeAllListeners();
+                    if (sock?.ev) {
+                        sock.ev.removeAllListeners();
                     }
-                    if (connection?.ws && connection.ws.readyState === 1) {
+                    if (sock?.ws) {
                         try {
-                            connection.ws.close();
+                            sock.ws.close();
                         } catch (e) {
-                            console.warn('WS close error:', e.message);
+                            console.warn('WebSocket close warning:', e.message);
                         }
                     }
-                    // Restore console.error after cleanup
-                    console.error = originalConsoleError;
                 };
 
-                connection.ev.on('connection.update', async (update) => {
-                    const { connection: conn, lastDisconnect } = update;
+                // Handle connection updates
+                sock.ev.on('connection.update', async (update) => {
+                    const { connection, lastDisconnect, qr } = update;
 
-                    console.log(`📡 [ATTEMPT ${attempt}] Connection update:`, conn);
+                    console.log(`📡 [ATTEMPT ${attempt}] Connection status: ${connection}`);
 
-                    if (conn === 'connecting') {
-                        console.log(`⏳ [ATTEMPT ${attempt}] Connecting to WhatsApp...`);
-                    }
-
-                    if (conn === 'open') {
-                        console.log(`✅ [ATTEMPT ${attempt}] Connection established successfully!`);
+                    if (connection === 'open') {
+                        console.log(`✅ [ATTEMPT ${attempt}] Connection established!`);
 
                         try {
                             // Wait for connection to stabilize
-                            console.log(`⏳ [ATTEMPT ${attempt}] Waiting for connection to stabilize...`);
                             await delay(5000);
 
                             // Prepare welcome message
+                            const phoneNumber = ownerJid.split('@')[0] || ownerJid.split(':')[0];
                             const welcomeMsg = `🎉 *GIFTED-MD CONNECTED SUCCESSFULLY!*
 
 ━━━━━━━━━━━━━━━━━━━
-✨ Your bot is now active and ready to use!
+✨ Your WhatsApp bot is now active!
 
 📱 *Session Details:*
-• Status: Active ✅
+• Status: ✅ Active
 • Owner: ${decodedCreds.me?.name || 'User'}
-• Number: ${ownerJid.split(':')[0] || ownerJid.split('@')[0]}
-• Session ID: ${sessionId.substring(0, 20)}...
+• Number: ${phoneNumber}
+• Platform: ${decodedCreds.platform || 'Unknown'}
 
-💡 *Quick Tips:*
+🔐 *Security:*
+• Session created at: ${new Date().toLocaleString()}
 • Keep your session ID secure
-• Don't share it with anyone
-• Restart bot if connection drops
+• Never share credentials
+
+💡 *Next Steps:*
+• Deploy your session ID to your bot
+• Configure your bot settings
+• Start using your bot features
 
 ━━━━━━━━━━━━━━━━━━━
 _Powered by GIFTED-MD_
-_Session created successfully!_`;
+_Baileys v7.0 | WhatsApp Multi-Device_`;
 
-                            console.log(`📤 [ATTEMPT ${attempt}] Sending welcome message to:`, ownerJid);
+                            console.log(`📤 [ATTEMPT ${attempt}] Sending welcome message...`);
                             
-                            // Send the message
-                            const sent = await connection.sendMessage(ownerJid, { 
+                            // Send message
+                            const sent = await sock.sendMessage(ownerJid, { 
                                 text: welcomeMsg 
                             });
 
-                            if (sent && sent.key && sent.key.id) {
-                                console.log(`✅ [ATTEMPT ${attempt}] Welcome message sent successfully!`);
-                                console.log(`📨 [ATTEMPT ${attempt}] Message ID:`, sent.key.id);
+                            if (sent?.key?.id) {
+                                console.log(`✅ [ATTEMPT ${attempt}] Message sent! ID: ${sent.key.id}`);
                                 
-                                // Wait for message delivery confirmation
-                                console.log(`⏳ [ATTEMPT ${attempt}] Waiting for message delivery confirmation...`);
+                                // Wait for delivery confirmation
                                 await delay(5000);
                                 
                                 await cleanup();
-                                resolve({ success: true, attempt, messageId: sent.key.id, sessionId });
+                                resolve({ 
+                                    success: true, 
+                                    attempt, 
+                                    messageId: sent.key.id,
+                                    sessionId 
+                                });
                             } else {
-                                throw new Error('Message send returned no key/id');
+                                throw new Error('Message sent but no key returned');
                             }
 
                         } catch (err) {
-                            console.error(`❌ [ATTEMPT ${attempt}] Error sending welcome message:`, err.message);
-                            console.error('Error stack:', err.stack);
+                            console.error(`❌ [ATTEMPT ${attempt}] Send error:`, err.message);
                             await cleanup();
                             reject(err);
                         }
                         
-                    } else if (conn === 'close') {
-                        const statusCode = lastDisconnect?.error?.output?.statusCode;
-                        const reason = lastDisconnect?.error?.output?.payload?.error;
+                    } else if (connection === 'close') {
+                        const statusCode = (lastDisconnect?.error instanceof Boom) 
+                            ? lastDisconnect.error.output.statusCode 
+                            : 500;
                         
-                        console.log(`❌ [ATTEMPT ${attempt}] Connection closed`);
-                        console.log('Status code:', statusCode);
-                        console.log('Reason:', reason);
+                        console.log(`❌ [ATTEMPT ${attempt}] Connection closed: ${statusCode}`);
 
                         await cleanup();
-                        reject(new Error(`Connection closed: ${statusCode} - ${reason}`));
+                        reject(new Error(`Connection closed with status: ${statusCode}`));
                     }
                 });
 
-                connection.ev.on('creds.update', async () => {
+                // Handle credentials update
+                sock.ev.on('creds.update', async () => {
                     try {
                         await saveCreds();
-                        console.log(`💾 [ATTEMPT ${attempt}] Credentials updated and saved`);
+                        console.log(`💾 [ATTEMPT ${attempt}] Credentials updated`);
                     } catch (e) {
-                        console.warn('Creds save error:', e.message);
+                        console.warn('Creds update warning:', e.message);
                     }
                 });
 
-                connection.ev.on('messages.upsert', async (m) => {
-                    console.log('📩 Message received:', JSON.stringify(m, null, 2));
+                // Handle messages (for debugging)
+                sock.ev.on('messages.upsert', async ({ messages, type }) => {
+                    console.log(`📩 [ATTEMPT ${attempt}] Message event: ${type}`);
                 });
             });
 
-            // If we get here, message was sent successfully
+            // Success - cleanup temp directory
             console.log(`\n✅ SUCCESS! Message delivered on attempt ${attempt}`);
             
-            // Final cleanup of session directory
             if (fs.existsSync(sessionDir)) {
                 try {
                     await removeFile(sessionDir);
-                    console.log('🧹 Cleaned up welcome session directory');
+                    console.log('🧹 Cleaned up temp directory');
                 } catch (e) {
-                    console.warn('Warning: Could not remove session directory:', e.message);
+                    console.warn('Cleanup warning:', e.message);
                 }
             }
             
             return result;
 
         } catch (err) {
-            // Restore console.error in case of error
-            if (originalConsoleError) {
-                console.error = originalConsoleError;
-            }
+            console.error(`\n❌ [ATTEMPT ${attempt}/${maxAttempts}] Failed: ${err.message}`);
             
-            console.error(`\n❌ [ATTEMPT ${attempt}/${maxAttempts}] Failed:`, err.message);
-            
-            // Cleanup connection
-            if (connection?.ev) {
-                connection.ev.removeAllListeners();
+            // Cleanup on error
+            if (sock?.ev) {
+                sock.ev.removeAllListeners();
             }
-            if (connection?.ws && connection.ws.readyState === 1) {
+            if (sock?.ws) {
                 try {
-                    connection.ws.close();
+                    sock.ws.close();
                 } catch (e) {}
             }
 
-            // If this is not the last attempt, wait before retrying
+            // Retry logic
             if (attempt < maxAttempts) {
                 const waitTime = attempt * 5000;
-                console.log(`⏳ Waiting ${waitTime/1000} seconds before retry...`);
+                console.log(`⏳ Waiting ${waitTime/1000}s before retry...`);
                 await delay(waitTime);
             } else {
                 console.error(`\n❌ ALL ${maxAttempts} ATTEMPTS FAILED`);
@@ -277,49 +279,68 @@ _Session created successfully!_`;
                     } catch (e) {}
                 }
                 
-                throw new Error(`Failed to send welcome message after ${maxAttempts} attempts: ${err.message}`);
+                throw new Error(`Failed after ${maxAttempts} attempts: ${err.message}`);
             }
         }
     }
 }
 
-async function cleanup(socket, authDir, timers = []) {
+/**
+ * Cleanup function for socket and directories
+ */
+async function cleanup(sock, authDir, timers = []) {
     try {
+        // Clear all timers
         timers.forEach(t => clearTimeout(t));
 
-        if (socket?.ev) {
-            socket.ev.removeAllListeners();
+        // Remove event listeners
+        if (sock?.ev) {
+            sock.ev.removeAllListeners();
         }
 
-        if (socket?.ws && socket.ws.readyState === 1) {
-            socket.ws.close();
+        // Close WebSocket
+        if (sock?.ws) {
+            try {
+                sock.ws.close();
+            } catch (e) {
+                console.warn('WS close error:', e.message);
+            }
         }
 
-        if (socket) {
-            socket.authState = null;
+        // Clear auth state
+        if (sock) {
+            sock.authState = null;
         }
 
+        // Clear session storage
         sessionStorage.clear();
 
+        // Remove temp directory
         if (fs.existsSync(authDir)) {
             await removeFile(authDir);
         }
 
-        console.log('✅ Main cleanup completed');
+        console.log('✅ Cleanup completed');
     } catch (err) {
-        console.error('Error during cleanup:', err.message);
+        console.error('⚠️ Cleanup error:', err.message);
     }
 }
 
+/**
+ * Main pairing endpoint
+ */
 router.get('/', async (req, res) => {
     const id = giftedId();
     let num = req.query.number;
 
     if (!num) {
-        return res.status(400).json({ error: "Phone number is required" });
+        return res.status(400).json({ 
+            error: "Phone number is required",
+            usage: "?number=1234567890" 
+        });
     }
 
-    // Clean up old temp directories
+    // Clean old temp directories
     const tempBaseDir = path.join(__dirname, 'temp');
     try {
         console.log('🧹 Cleaning old temp directories...');
@@ -328,102 +349,131 @@ router.get('/', async (req, res) => {
             for (const dir of tempDirs) {
                 const dirPath = path.join(tempBaseDir, dir);
                 try {
-                    if (fs.statSync(dirPath).isDirectory()) {
-                        await removeFile(dirPath);
-                        console.log(`✅ Removed old temp directory: ${dir}`);
+                    const stat = fs.statSync(dirPath);
+                    if (stat.isDirectory()) {
+                        // Remove directories older than 1 hour
+                        const age = Date.now() - stat.mtimeMs;
+                        if (age > 3600000) {
+                            await removeFile(dirPath);
+                            console.log(`✅ Removed old directory: ${dir}`);
+                        }
                     }
                 } catch (e) {
-                    console.warn(`⚠️ Could not remove ${dir}:`, e.message);
+                    console.warn(`⚠️ Could not check ${dir}:`, e.message);
                 }
             }
         }
-        console.log('✅ Temp cleanup completed');
     } catch (e) {
-        console.warn('⚠️ Error during temp cleanup:', e.message);
+        console.warn('⚠️ Temp cleanup warning:', e.message);
     }
 
     const authDir = path.join(__dirname, 'temp', id);
-    let socket = null;
+    let sock = null;
     let timers = [];
     let hasResponded = false;
     let connectionEstablished = false;
     let retryCount = 0;
     const MAX_RETRIES = 2;
 
+    // Global timeout (5 minutes)
     const globalTimeout = setTimeout(async () => {
-        if (!connectionEstablished) {
+        if (!connectionEstablished && !hasResponded) {
             console.log('⏱️ Global timeout reached');
-            await cleanup(socket, authDir, timers);
-            if (!hasResponded) {
-                hasResponded = true;
-                res.status(408).json({ error: "Connection timeout. Please try again." });
-            }
+            await cleanup(sock, authDir, timers);
+            hasResponded = true;
+            res.status(408).json({ 
+                error: "Connection timeout. Please try again.",
+                timeout: "5 minutes"
+            });
         }
     }, 5 * 60 * 1000);
 
     timers.push(globalTimeout);
 
+    /**
+     * Pairing code generation function
+     */
     async function GIFTED_PAIR_CODE() {
         try {
+            // Create auth directory
             if (!fs.existsSync(authDir)) {
                 fs.mkdirSync(authDir, { recursive: true });
             }
 
+            // Initialize auth state
             const { state, saveCreds } = await useMultiFileAuthState(authDir);
-            const { version } = await fetchLatestBaileysVersion();
 
-            // Use makeWASocket directly
-            socket = makeWASocket({
+            // Fetch latest version
+            const { version, isLatest } = await fetchLatestBaileysVersion();
+            console.log(`📡 Using WA version: ${version.join('.')}, isLatest: ${isLatest}`);
+
+            // Create socket for pairing
+            sock = makeWASocket({
                 version,
                 auth: {
                     creds: state.creds,
-                    keys: makeCacheableSignalKeyStore(
-                        state.keys, 
-                        pino({ level: "fatal" })
-                    ),
+                    keys: makeCacheableSignalKeyStore(state.keys, logger),
                 },
                 printQRInTerminal: false,
-                logger: pino({ level: "fatal" }),
+                logger,
                 browser: Browsers.macOS("Safari"),
-                markOnlineOnConnect: false
+                markOnlineOnConnect: false,
+                generateHighQualityLinkPreview: true,
+                syncFullHistory: false,
+                getMessage: async (key) => {
+                    return { conversation: '' };
+                }
             });
 
-            if (!socket.authState.creds.registered) {
+            // Request pairing code if not registered
+            if (!sock.authState.creds.registered) {
                 await delay(1500);
                 num = num.replace(/[^0-9]/g, '');
-                const code = await socket.requestPairingCode(num);
+                
+                console.log('📱 Requesting pairing code for:', num);
+                const code = await sock.requestPairingCode(num);
+                console.log('✅ Pairing code generated:', code);
 
                 if (!hasResponded) {
                     hasResponded = true;
                     res.json({ 
                         code,
-                        message: "Enter this code in WhatsApp. You'll receive a welcome message once connected."
+                        message: "Enter this code in WhatsApp (Linked Devices > Link a Device > Link with phone number instead)",
+                        number: num,
+                        expiresIn: "60 seconds"
                     });
                 }
             }
 
-            socket.ev.on('creds.update', async () => {
+            // Listen for credential updates
+            sock.ev.on('creds.update', async () => {
                 try {
                     await saveCreds();
+                    console.log('💾 Credentials updated');
                 } catch (err) {
-                    console.warn('saveCreds on creds.update failed:', err.message);
+                    console.warn('Creds save warning:', err.message);
                 }
             });
 
-            socket.ev.on("connection.update", async (update) => {
-                const { connection, lastDisconnect } = update;
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
+            // Handle connection updates
+            sock.ev.on("connection.update", async (update) => {
+                const { connection, lastDisconnect, qr } = update;
+                const statusCode = lastDisconnect?.error instanceof Boom
+                    ? lastDisconnect.error.output.statusCode
+                    : 500;
 
                 if (connection === "open") {
                     connectionEstablished = true;
                     console.log('✅ Pairing connection established');
 
                     try {
-                        console.log('⏳ Waiting for credentials to be fully saved...');
+                        // Wait for full authentication
+                        console.log('⏳ Waiting for authentication to complete...');
                         await delay(8000);
 
+                        // Save credentials
                         await saveCreds();
-                        console.log('💾 Final credentials save completed');
+                        console.log('💾 Final credentials saved');
 
                         // Generate session ID
                         const sessionId = await saveSessionLocallyFromPath(authDir);
@@ -431,86 +481,66 @@ router.get('/', async (req, res) => {
                             throw new Error('Failed to generate session ID');
                         }
 
-                        console.log('✅ Session ID generated successfully');
+                        console.log('✅ Session ID generated');
                         console.log('🔌 Closing pairing connection...');
 
-                        // Close the pairing connection
-                        if (socket?.ev) {
-                            socket.ev.removeAllListeners();
+                        // Close pairing connection
+                        if (sock?.ev) {
+                            sock.ev.removeAllListeners();
                         }
-                        if (socket?.ws && socket.ws.readyState === 1) {
-                            socket.ws.close();
+                        if (sock?.ws) {
+                            sock.ws.close();
                         }
                         
                         await delay(3000);
                         console.log('✅ Pairing connection closed');
 
                         // Send welcome message with retry
-                        console.log('🚀 Starting welcome message sender with retry logic...');
+                        console.log('🚀 Initiating welcome message delivery...');
                         const result = await sendWelcomeMessageWithRetry(sessionId, 3);
                         
                         console.log(`\n🎉 COMPLETE SUCCESS!`);
-                        console.log(`✅ Welcome message delivered on attempt ${result.attempt}`);
+                        console.log(`✅ Message delivered on attempt ${result.attempt}`);
                         console.log(`📨 Message ID: ${result.messageId}`);
                         console.log(`🔑 Session ID: ${result.sessionId.substring(0, 30)}...`);
 
                         // Final cleanup
-                        await cleanup(socket, authDir, timers);
+                        await cleanup(sock, authDir, timers);
 
                     } catch (err) {
-                        console.error('❌ Error in connection.open handler:', err.message);
-                        console.error('Stack:', err.stack);
-                        await cleanup(socket, authDir, timers);
+                        console.error('❌ Connection.open error:', err.message);
+                        await cleanup(sock, authDir, timers);
 
                         if (!hasResponded) {
                             hasResponded = true;
                             res.status(500).json({ 
-                                error: "Failed to send welcome message. Session may still be valid." 
+                                error: "Failed to send welcome message",
+                                details: err.message,
+                                note: "Session may still be valid. Check your WhatsApp."
                             });
                         }
                     }
 
                 } else if (connection === "close") {
-                    console.log('⚠️ Pairing connection closed. Status code:', statusCode);
+                    console.log('⚠️ Pairing connection closed. Status:', statusCode);
 
+                    // Check if logged out
                     if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                        console.log('⚠️ Logged out or unauthorized');
-                        await cleanup(socket, authDir, timers);
+                        console.log('⚠️ Device logged out or unauthorized');
+                        await cleanup(sock, authDir, timers);
 
                         if (!hasResponded) {
                             hasResponded = true;
-                            res.status(401).json({ error: "Authentication failed" });
+                            res.status(401).json({ 
+                                error: "Authentication failed",
+                                reason: "Device logged out or unauthorized"
+                            });
                         }
                         return;
                     }
 
+                    // Retry logic
                     if (!connectionEstablished && retryCount < MAX_RETRIES) {
                         retryCount++;
-                        console.log(`🔄 Retrying connection (${retryCount}/${MAX_RETRIES})...`);
-                        await delay(5000);
-                        GIFTED_PAIR_CODE().catch(err => {
-                            console.error('Retry error:', err.message);
-                        });
-                    } else {
-                        console.log('❌ Max retries reached or connection was established');
-                        await cleanup(socket, authDir, timers);
-                    }
-                }
-            });
-
-        } catch (err) {
-            console.error('❌ GIFTED_PAIR_CODE error:', err.message);
-            console.error('Stack:', err.stack);
-            await cleanup(socket, authDir, timers);
-
-            if (!hasResponded) {
-                hasResponded = true;
-                res.status(500).json({ error: "Service unavailable. Please try again." });
-            }
-        }
-    }
-
-    await GIFTED_PAIR_CODE();
-});
-
-module.exports = router;
+                        console.log(`🔄 Retrying (${retryCount}/${MAX_RETRIES})...`);
+                        await dela
