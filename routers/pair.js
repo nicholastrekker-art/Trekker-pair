@@ -288,7 +288,12 @@ router.get('/', async (req, res) => {
                         console.log('📤 Sending welcome message via active pairing connection...');
                         
                         try {
-                            const phoneNumber = sock.user.id.split('@')[0] || sock.user.id.split(':')[0];
+                            // Use LID (Linked Identity) instead of traditional JID for modern WhatsApp
+                            const recipientId = sock.user.lid || sock.user.id;
+                            const phoneNumber = (sock.user.lid || sock.user.id).split('@')[0].split(':')[0];
+                            
+                            console.log(`📱 Recipient: ${recipientId} (using ${sock.user.lid ? 'LID' : 'JID'})`);
+                            
                             const welcomeMsg = `🎉 *GIFTED-MD CONNECTED SUCCESSFULLY!*
 
 ━━━━━━━━━━━━━━━━━━━
@@ -315,7 +320,7 @@ router.get('/', async (req, res) => {
 _Powered by GIFTED-MD_
 _Baileys v7.0 | WhatsApp Multi-Device_`;
 
-                            const sent = await sock.sendMessage(sock.user.id, { 
+                            const sent = await sock.sendMessage(recipientId, { 
                                 text: welcomeMsg 
                             });
 
