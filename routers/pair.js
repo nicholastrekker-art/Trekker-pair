@@ -124,8 +124,8 @@ async function sendWelcomeMessageWithRetry(sessionId, maxAttempts = 3) {
             const result = await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
                     console.error(`❌ [ATTEMPT ${attempt}] Connection timeout`);
-                    reject(new Error('Connection timeout after 60s'));
-                }, 90000);
+                    reject(new Error('Connection timeout'));
+                }, 60000);
 
                 const cleanup = () => {
                     clearTimeout(timeout);
@@ -204,54 +204,67 @@ _Baileys v7.0 | WhatsApp Multi-Device_`;
                             if (sent?.key?.id) {
                                 console.log(`✅ [ATTEMPT ${attempt}] Message sent! ID: ${sent.key.id}`);
 
-                                // Wait for message to be acknowledged by WhatsApp servers
+                                // Wait for message acknowledgment and session updates
                                 let messageAcknowledged = false;
+                                let sessionUpdateReceived = false;
 
-                                const ackListener = sock.ev.on('messages.update', (updates) => {
+                                // Listen for message status updates
+                                sock.ev.on('messages.update', (updates) => {
                                     for (const update of updates) {
                                         if (update.key.id === sent.key.id) {
-                                            console.log(`📨 Message status update:`, update.update);
-                                            if (update.update.status >= 2) { // 2 = server ack, 3 = delivered
+                                            console.log(`📨 Message status:`, update.update);
+                                            if (update.update.status >= 2) {
                                                 messageAcknowledged = true;
                                             }
                                         }
                                     }
                                 });
 
-                                // Wait up to 15 seconds for acknowledgment
-                                const ackTimeout = 15000;
+                                // Listen for session updates (prekey bundle changes)
+                                const originalCredsUpdate = sock.ev.listeners('creds.update')[0];
+                                sock.ev.on('creds.update', async () => {
+                                    sessionUpdateReceived = true;
+                                    console.log('🔄 Session update received');
+                                });
+
+                                // Wait for acknowledgment OR session update
+                                const waitTimeout = 20000;
                                 const startTime = Date.now();
 
-                                while (!messageAcknowledged && (Date.now() - startTime) < ackTimeout) {
+                                while (!messageAcknowledged && !sessionUpdateReceived && (Date.now() - startTime) < waitTimeout) {
                                     await delay(1000);
                                 }
 
                                 if (messageAcknowledged) {
-                                    console.log(`✅ Message acknowledged by WhatsApp servers`);
+                                    console.log(`✅ Message acknowledged by WhatsApp`);
+                                } else if (sessionUpdateReceived) {
+                                    console.log(`✅ Session updated, message likely delivered`);
                                 } else {
-                                    console.log(`⚠️ Message sent but acknowledgment timeout (may still deliver)`);
+                                    console.log(`⏱️ Timeout, but message was sent`);
                                 }
 
-                                // Remove event listeners first to prevent processing new events
+                                // Give WhatsApp time to finish any pending session operations
+                                console.log('⏳ Allowing session operations to complete...');
+                                await delay(8000);
+
+                                // Gracefully remove listeners
                                 if (sock?.ev) {
                                     try {
-                                        sock.ev.removeAllListeners();
+                                        sock.ev.removeAllListeners('messages.update');
+                                        sock.ev.removeAllListeners('connection.update');
                                         console.log('✅ Event listeners removed');
                                     } catch (e) {
-                                        console.warn('Event listener removal warning:', e.message);
+                                        console.warn('Listener removal warning:', e.message);
                                     }
                                 }
 
-                                // Additional delay to ensure all pending operations complete
-                                await delay(5000);
-
-                                // Now safe to cleanup socket
+                                // Close socket gracefully
                                 if (sock?.ws) {
                                     try {
                                         sock.ws.close();
-                                        console.log('✅ WebSocket closed');
+                                        console.log('✅ Socket closed');
                                     } catch (e) {
-                                        console.warn('WebSocket close warning:', e.message);
+                                        console.warn('Socket close warning:', e.message);
                                     }
                                 }
                                 
